@@ -1535,6 +1535,7 @@ func (c *Converter) InstanceToAPIV1Instance(ctx context.Context, i *gtsmodel.Ins
 		Title:                i.Title,
 		Description:          i.Description,
 		DescriptionText:      i.DescriptionText,
+		CustomCSS:            i.CustomCSS,
 		ShortDescription:     i.ShortDescription,
 		ShortDescriptionText: i.ShortDescriptionText,
 		Email:                i.ContactEmail,
@@ -1662,6 +1663,7 @@ func (c *Converter) InstanceToAPIV2Instance(ctx context.Context, i *gtsmodel.Ins
 		SourceURL:       instanceSourceURL,
 		Description:     i.Description,
 		DescriptionText: i.DescriptionText,
+		CustomCSS:       i.CustomCSS,
 		Usage:           apimodel.InstanceV2Usage{}, // todo: not implemented
 		Languages:       config.GetInstanceLanguages().TagStrs(),
 		Rules:           c.InstanceRulesToAPIRules(i.Rules),
