@@ -42,7 +42,7 @@ type domainPermAction struct {
 
 	// Type of permission
 	// to create or delete.
-	permissionType gtsmodel.DomainPermissionType
+	permType gtsmodel.DomainPermissionType
 
 	// Domain to target
 	// with the permission.
@@ -89,9 +89,9 @@ func (suite *DomainBlockTestSuite) runDomainPermTest(t domainPermTest) {
 		var actionID string
 		switch action.createOrDelete {
 		case "create":
-			_, actionID = suite.createDomainPerm(action.permissionType, action.domain)
+			_, actionID = suite.createDomainPerm(action.permType, action.domain)
 		case "delete":
-			_, actionID = suite.deleteDomainPerm(action.permissionType, action.domain)
+			_, actionID = suite.deleteDomainPerm(action.permType, action.domain)
 		default:
 			panic("createOrDelete was not 'create' or 'delete'")
 		}
@@ -118,16 +118,16 @@ func (suite *DomainBlockTestSuite) runDomainPermTest(t domainPermTest) {
 	}
 }
 
-// create given permissionType with default values.
+// create given permType with default values.
 func (suite *DomainBlockTestSuite) createDomainPerm(
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	domain string,
 ) (*apimodel.DomainPermission, string) {
 	ctx := context.Background()
 
 	apiPerm, actionID, errWithCode := suite.adminProcessor.DomainPermissionCreate(
 		ctx,
-		permissionType,
+		permType,
 		suite.testAccounts["admin_account"],
 		domain,
 		false,
@@ -144,7 +144,7 @@ func (suite *DomainBlockTestSuite) createDomainPerm(
 
 // delete given permission type.
 func (suite *DomainBlockTestSuite) deleteDomainPerm(
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	domain string,
 ) (*apimodel.DomainPermission, string) {
 	var (
@@ -154,7 +154,7 @@ func (suite *DomainBlockTestSuite) deleteDomainPerm(
 
 	// To delete the permission,
 	// first get it from the db.
-	switch permissionType {
+	switch permType {
 	case gtsmodel.DomainPermissionBlock:
 		domainPermission, _ = suite.db.GetDomainBlock(ctx, domain)
 	case gtsmodel.DomainPermissionAllow:
@@ -170,7 +170,7 @@ func (suite *DomainBlockTestSuite) deleteDomainPerm(
 	// Now use the ID to delete it.
 	apiPerm, actionID, errWithCode := suite.adminProcessor.DomainPermissionDelete(
 		ctx,
-		permissionType,
+		permType,
 		suite.testAccounts["admin_account"],
 		domainPermission.GetID(),
 	)
@@ -246,7 +246,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndUnblockDomain() {
 		actions: []domainPermAction{
 			{
 				createOrDelete: "create",
-				permissionType: gtsmodel.DomainPermissionBlock,
+				permType:       gtsmodel.DomainPermissionBlock,
 				domain:         domain,
 				expected: func(_ context.Context, account *gtsmodel.Account) bool {
 					// Domain was blocked, so each
@@ -256,7 +256,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndUnblockDomain() {
 			},
 			{
 				createOrDelete: "delete",
-				permissionType: gtsmodel.DomainPermissionBlock,
+				permType:       gtsmodel.DomainPermissionBlock,
 				domain:         domain,
 				expected: func(_ context.Context, account *gtsmodel.Account) bool {
 					// Domain was unblocked, so each
@@ -279,7 +279,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndAllowDomain() {
 		actions: []domainPermAction{
 			{
 				createOrDelete: "create",
-				permissionType: gtsmodel.DomainPermissionBlock,
+				permType:       gtsmodel.DomainPermissionBlock,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Domain was blocked, so each
@@ -316,7 +316,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndAllowDomain() {
 			},
 			{
 				createOrDelete: "create",
-				permissionType: gtsmodel.DomainPermissionAllow,
+				permType:       gtsmodel.DomainPermissionAllow,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Domain was explicitly allowed, so each
@@ -355,7 +355,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndAllowDomain() {
 			},
 			{
 				createOrDelete: "delete",
-				permissionType: gtsmodel.DomainPermissionAllow,
+				permType:       gtsmodel.DomainPermissionAllow,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Deleting the allow now, while there's
@@ -382,7 +382,7 @@ func (suite *DomainBlockTestSuite) TestBlockAndAllowDomain() {
 			},
 			{
 				createOrDelete: "delete",
-				permissionType: gtsmodel.DomainPermissionBlock,
+				permType:       gtsmodel.DomainPermissionBlock,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Deleting the block now should
@@ -421,7 +421,7 @@ func (suite *DomainBlockTestSuite) TestAllowAndBlockDomain() {
 		actions: []domainPermAction{
 			{
 				createOrDelete: "create",
-				permissionType: gtsmodel.DomainPermissionAllow,
+				permType:       gtsmodel.DomainPermissionAllow,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Domain was explicitly allowed,
@@ -458,7 +458,7 @@ func (suite *DomainBlockTestSuite) TestAllowAndBlockDomain() {
 			},
 			{
 				createOrDelete: "create",
-				permissionType: gtsmodel.DomainPermissionBlock,
+				permType:       gtsmodel.DomainPermissionBlock,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Create a block. An allow existed, so
@@ -497,7 +497,7 @@ func (suite *DomainBlockTestSuite) TestAllowAndBlockDomain() {
 			},
 			{
 				createOrDelete: "delete",
-				permissionType: gtsmodel.DomainPermissionAllow,
+				permType:       gtsmodel.DomainPermissionAllow,
 				domain:         domain,
 				expected: func(ctx context.Context, account *gtsmodel.Account) bool {
 					// Deleting the allow now, while there's

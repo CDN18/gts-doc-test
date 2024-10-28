@@ -20,18 +20,25 @@ package gtsmodel
 import "time"
 
 // DomainPermission models a domain
-// permission entry (block/allow).
+// permission entry (block/allow/draft).
 type DomainPermission interface {
 	GetID() string
 	GetCreatedAt() time.Time
 	GetUpdatedAt() time.Time
+	SetUpdatedAt(i time.Time)
 	GetDomain() string
 	GetCreatedByAccountID() string
+	SetCreatedByAccountID(i string)
 	GetCreatedByAccount() *Account
+	SetCreatedByAccount(i *Account)
 	GetPrivateComment() string
+	SetPrivateComment(i string)
 	GetPublicComment() string
+	SetPublicComment(i string)
 	GetObfuscate() *bool
+	SetObfuscate(i *bool)
 	GetSubscriptionID() string
+	SetSubscriptionID(i string)
 	GetType() DomainPermissionType
 }
 

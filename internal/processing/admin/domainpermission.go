@@ -31,24 +31,6 @@ import (
 	"github.com/superseriousbusiness/gotosocial/internal/gtsmodel"
 )
 
-// apiDomainPerm is a cheeky shortcut for returning
-// the API version of the given domain permission
-// (*gtsmodel.DomainBlock or *gtsmodel.DomainAllow),
-// or an appropriate error if something goes wrong.
-func (p *Processor) apiDomainPerm(
-	ctx context.Context,
-	domainPermission gtsmodel.DomainPermission,
-	export bool,
-) (*apimodel.DomainPermission, gtserror.WithCode) {
-	apiDomainPerm, err := p.converter.DomainPermToAPIDomainPerm(ctx, domainPermission, export)
-	if err != nil {
-		err := gtserror.NewfAt(3, "error converting domain permission to api model: %w", err)
-		return nil, gtserror.NewErrorInternalError(err)
-	}
-
-	return apiDomainPerm, nil
-}
-
 // DomainPermissionCreate creates an instance-level permission
 // targeting the given domain, and then processes any side
 // effects of the permission creation.
@@ -61,7 +43,7 @@ func (p *Processor) apiDomainPerm(
 // from this call, and/or an error if something goes wrong.
 func (p *Processor) DomainPermissionCreate(
 	ctx context.Context,
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	adminAcct *gtsmodel.Account,
 	domain string,
 	obfuscate bool,
@@ -69,7 +51,7 @@ func (p *Processor) DomainPermissionCreate(
 	privateComment string,
 	subscriptionID string,
 ) (*apimodel.DomainPermission, string, gtserror.WithCode) {
-	switch permissionType {
+	switch permType {
 
 	// Explicitly block a domain.
 	case gtsmodel.DomainPermissionBlock:
@@ -97,7 +79,7 @@ func (p *Processor) DomainPermissionCreate(
 
 	// Weeping, roaring, red-faced.
 	default:
-		err := gtserror.Newf("unrecognized permission type %d", permissionType)
+		err := gtserror.Newf("unrecognized permission type %d", permType)
 		return nil, "", gtserror.NewErrorInternalError(err)
 	}
 }
@@ -109,11 +91,11 @@ func (p *Processor) DomainPermissionCreate(
 // action resulting from this call, and/or an error if something goes wrong.
 func (p *Processor) DomainPermissionDelete(
 	ctx context.Context,
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	adminAcct *gtsmodel.Account,
 	domainBlockID string,
 ) (*apimodel.DomainPermission, string, gtserror.WithCode) {
-	switch permissionType {
+	switch permType {
 
 	// Delete explicit domain block.
 	case gtsmodel.DomainPermissionBlock:
@@ -134,7 +116,7 @@ func (p *Processor) DomainPermissionDelete(
 	// You do the hokey-cokey and you turn
 	// around, that's what it's all about.
 	default:
-		err := gtserror.Newf("unrecognized permission type %d", permissionType)
+		err := gtserror.Newf("unrecognized permission type %d", permType)
 		return nil, "", gtserror.NewErrorInternalError(err)
 	}
 }
@@ -152,14 +134,14 @@ func (p *Processor) DomainPermissionDelete(
 // as they wish.
 func (p *Processor) DomainPermissionsImport(
 	ctx context.Context,
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	account *gtsmodel.Account,
 	domainsF *multipart.FileHeader,
 ) (*apimodel.MultiStatus, gtserror.WithCode) {
 	// Ensure known permission type.
-	if permissionType != gtsmodel.DomainPermissionBlock &&
-		permissionType != gtsmodel.DomainPermissionAllow {
-		err := gtserror.Newf("unrecognized permission type %d", permissionType)
+	if permType != gtsmodel.DomainPermissionBlock &&
+		permType != gtsmodel.DomainPermissionAllow {
+		err := gtserror.Newf("unrecognized permission type %d", permType)
 		return nil, gtserror.NewErrorInternalError(err)
 	}
 
@@ -201,7 +183,7 @@ func (p *Processor) DomainPermissionsImport(
 
 		domainPerm, _, errWithCode = p.DomainPermissionCreate(
 			ctx,
-			permissionType,
+			permType,
 			account,
 			domain,
 			obfuscate,
@@ -240,7 +222,7 @@ func (p *Processor) DomainPermissionsImport(
 // to an export.
 func (p *Processor) DomainPermissionsGet(
 	ctx context.Context,
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	account *gtsmodel.Account,
 	export bool,
 ) ([]*apimodel.DomainPermission, gtserror.WithCode) {
@@ -249,7 +231,7 @@ func (p *Processor) DomainPermissionsGet(
 		err         error
 	)
 
-	switch permissionType {
+	switch permType {
 	case gtsmodel.DomainPermissionBlock:
 		var blocks []*gtsmodel.DomainBlock
 
@@ -279,7 +261,7 @@ func (p *Processor) DomainPermissionsGet(
 	}
 
 	if err != nil {
-		err := gtserror.Newf("error getting %ss: %w", permissionType.String(), err)
+		err := gtserror.Newf("error getting %ss: %w", permType.String(), err)
 		return nil, gtserror.NewErrorInternalError(err)
 	}
 
@@ -303,7 +285,7 @@ func (p *Processor) DomainPermissionsGet(
 // suitable for writing out to an export.
 func (p *Processor) DomainPermissionGet(
 	ctx context.Context,
-	permissionType gtsmodel.DomainPermissionType,
+	permType gtsmodel.DomainPermissionType,
 	id string,
 	export bool,
 ) (*apimodel.DomainPermission, gtserror.WithCode) {
@@ -312,7 +294,7 @@ func (p *Processor) DomainPermissionGet(
 		err        error
 	)
 
-	switch permissionType {
+	switch permType {
 	case gtsmodel.DomainPermissionBlock:
 		domainPerm, err = p.state.DB.GetDomainBlockByID(ctx, id)
 	case gtsmodel.DomainPermissionAllow:
@@ -323,11 +305,11 @@ func (p *Processor) DomainPermissionGet(
 
 	if err != nil {
 		if errors.Is(err, db.ErrNoEntries) {
-			err = fmt.Errorf("no domain %s exists with id %s", permissionType.String(), id)
+			err = fmt.Errorf("no domain %s exists with id %s", permType.String(), id)
 			return nil, gtserror.NewErrorNotFound(err, err.Error())
 		}
 
-		err = gtserror.Newf("error getting domain %s with id %s: %w", permissionType.String(), id, err)
+		err = gtserror.Newf("error getting domain %s with id %s: %w", permType.String(), id, err)
 		return nil, gtserror.NewErrorInternalError(err)
 	}
 

@@ -19,12 +19,19 @@ package bundb
 
 import (
 	"context"
+	"errors"
 	"net/url"
+	"slices"
+	"time"
 
+	"github.com/miekg/dns"
 	"github.com/superseriousbusiness/gotosocial/internal/config"
 	"github.com/superseriousbusiness/gotosocial/internal/db"
+	"github.com/superseriousbusiness/gotosocial/internal/gtscontext"
 	"github.com/superseriousbusiness/gotosocial/internal/gtserror"
 	"github.com/superseriousbusiness/gotosocial/internal/gtsmodel"
+	"github.com/superseriousbusiness/gotosocial/internal/log"
+	"github.com/superseriousbusiness/gotosocial/internal/paging"
 	"github.com/superseriousbusiness/gotosocial/internal/state"
 	"github.com/superseriousbusiness/gotosocial/internal/util"
 	"github.com/uptrace/bun"
@@ -108,6 +115,36 @@ func (d *domainDB) GetDomainAllowByID(ctx context.Context, id string) (*gtsmodel
 	}
 
 	return &allow, nil
+}
+
+func (d *domainDB) UpdateDomainAllow(ctx context.Context, allow *gtsmodel.DomainAllow, columns ...string) error {
+	// Normalize the domain as punycode
+	var err error
+	allow.Domain, err = util.Punify(allow.Domain)
+	if err != nil {
+		return err
+	}
+
+	// Ensure updated_at is set.
+	allow.UpdatedAt = time.Now()
+	if len(columns) != 0 {
+		columns = append(columns, "updated_at")
+	}
+
+	// Attempt to update domain allow.
+	if _, err := d.db.
+		NewUpdate().
+		Model(allow).
+		Column(columns...).
+		Where("? = ?", bun.Ident("domain_allow.id"), allow.ID).
+		Exec(ctx); err != nil {
+		return err
+	}
+
+	// Clear the domain allow cache (for later reload)
+	d.state.Caches.DB.DomainAllow.Clear()
+
+	return nil
 }
 
 func (d *domainDB) DeleteDomainAllow(ctx context.Context, domain string) error {
@@ -204,6 +241,36 @@ func (d *domainDB) GetDomainBlockByID(ctx context.Context, id string) (*gtsmodel
 	}
 
 	return &block, nil
+}
+
+func (d *domainDB) UpdateDomainBlock(ctx context.Context, block *gtsmodel.DomainBlock, columns ...string) error {
+	// Normalize the domain as punycode
+	var err error
+	block.Domain, err = util.Punify(block.Domain)
+	if err != nil {
+		return err
+	}
+
+	// Ensure updated_at is set.
+	block.UpdatedAt = time.Now()
+	if len(columns) != 0 {
+		columns = append(columns, "updated_at")
+	}
+
+	// Attempt to update domain block.
+	if _, err := d.db.
+		NewUpdate().
+		Model(block).
+		Column(columns...).
+		Where("? = ?", bun.Ident("domain_block.id"), block.ID).
+		Exec(ctx); err != nil {
+		return err
+	}
+
+	// Clear the domain block cache (for later reload)
+	d.state.Caches.DB.DomainBlock.Clear()
+
+	return nil
 }
 
 func (d *domainDB) DeleteDomainBlock(ctx context.Context, domain string) error {
@@ -327,4 +394,702 @@ func (d *domainDB) AreURIsBlocked(ctx context.Context, uris []*url.URL) (bool, e
 		}
 	}
 	return false, nil
+}
+
+func (d *domainDB) getDomainPermissionDraft(
+	ctx context.Context,
+	lookup string,
+	dbQuery func(*gtsmodel.DomainPermissionDraft) error,
+	keyParts ...any,
+) (*gtsmodel.DomainPermissionDraft, error) {
+	// Fetch perm draft from database cache with loader callback.
+	permDraft, err := d.state.Caches.DB.DomainPermissionDraft.LoadOne(
+		lookup,
+		// Only called if not cached.
+		func() (*gtsmodel.DomainPermissionDraft, error) {
+			var permDraft gtsmodel.DomainPermissionDraft
+			if err := dbQuery(&permDraft); err != nil {
+				return nil, err
+			}
+			return &permDraft, nil
+		},
+		keyParts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if gtscontext.Barebones(ctx) {
+		// No need to fully populate.
+		return permDraft, nil
+	}
+
+	if permDraft.CreatedByAccount == nil {
+		// Not set, fetch from database.
+		permDraft.CreatedByAccount, err = d.state.DB.GetAccountByID(
+			gtscontext.SetBarebones(ctx),
+			permDraft.CreatedByAccountID,
+		)
+		if err != nil {
+			return nil, gtserror.Newf("error populating created by account: %w", err)
+		}
+	}
+
+	return permDraft, nil
+}
+
+func (d *domainDB) GetDomainPermissionDraftByID(
+	ctx context.Context,
+	id string,
+) (*gtsmodel.DomainPermissionDraft, error) {
+	return d.getDomainPermissionDraft(
+		ctx,
+		"ID",
+		func(permDraft *gtsmodel.DomainPermissionDraft) error {
+			return d.db.
+				NewSelect().
+				Model(permDraft).
+				Where("? = ?", bun.Ident("domain_permission_draft.id"), id).
+				Scan(ctx)
+		},
+		id,
+	)
+}
+
+func (d *domainDB) GetDomainPermissionDrafts(
+	ctx context.Context,
+	permType gtsmodel.DomainPermissionType,
+	permSubID string,
+	domain string,
+	page *paging.Page,
+) (
+	[]*gtsmodel.DomainPermissionDraft,
+	error,
+) {
+	var (
+		// Get paging params.
+		minID = page.GetMin()
+		maxID = page.GetMax()
+		limit = page.GetLimit()
+		order = page.GetOrder()
+
+		// Make educated guess for slice size
+		permDraftIDs = make([]string, 0, limit)
+	)
+
+	q := d.db.
+		NewSelect().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_drafts"),
+			bun.Ident("domain_permission_draft"),
+		).
+		// Select only IDs from table
+		Column("domain_permission_draft.id")
+
+	// Return only items with id
+	// lower than provided maxID.
+	if maxID != "" {
+		q = q.Where(
+			"? < ?",
+			bun.Ident("domain_permission_draft.id"),
+			maxID,
+		)
+	}
+
+	// Return only items with id
+	// greater than provided minID.
+	if minID != "" {
+		q = q.Where(
+			"? > ?",
+			bun.Ident("domain_permission_draft.id"),
+			minID,
+		)
+	}
+
+	// Return only items with
+	// given permission type.
+	if permType != gtsmodel.DomainPermissionUnknown {
+		q = q.Where(
+			"? = ?",
+			bun.Ident("domain_permission_draft.permission_type"),
+			permType,
+		)
+	}
+
+	// Return only items with
+	// given subscription ID.
+	if permSubID != "" {
+		q = q.Where(
+			"? = ?",
+			bun.Ident("domain_permission_draft.subscription_id"),
+			permSubID,
+		)
+	}
+
+	// Return only items
+	// with given domain.
+	if domain != "" {
+		var err error
+
+		// Normalize domain as punycode.
+		domain, err = util.Punify(domain)
+		if err != nil {
+			return nil, gtserror.Newf("error punifying domain %s: %w", domain, err)
+		}
+
+		q = q.Where(
+			"? = ?",
+			bun.Ident("domain_permission_draft.domain"),
+			domain,
+		)
+	}
+
+	if limit > 0 {
+		// Limit amount of
+		// items returned.
+		q = q.Limit(limit)
+	}
+
+	if order == paging.OrderAscending {
+		// Page up.
+		q = q.OrderExpr(
+			"? ASC",
+			bun.Ident("domain_permission_draft.id"),
+		)
+	} else {
+		// Page down.
+		q = q.OrderExpr(
+			"? DESC",
+			bun.Ident("domain_permission_draft.id"),
+		)
+	}
+
+	if err := q.Scan(ctx, &permDraftIDs); err != nil {
+		return nil, err
+	}
+
+	// Catch case of no items early
+	if len(permDraftIDs) == 0 {
+		return nil, db.ErrNoEntries
+	}
+
+	// If we're paging up, we still want items
+	// to be sorted by ID desc, so reverse slice.
+	if order == paging.OrderAscending {
+		slices.Reverse(permDraftIDs)
+	}
+
+	// Allocate return slice (will be at most len permDraftIDs)
+	permDrafts := make([]*gtsmodel.DomainPermissionDraft, 0, len(permDraftIDs))
+	for _, id := range permDraftIDs {
+		permDraft, err := d.GetDomainPermissionDraftByID(ctx, id)
+		if err != nil {
+			log.Errorf(ctx, "error getting domain permission draft %q: %v", id, err)
+			continue
+		}
+
+		// Append to return slice
+		permDrafts = append(permDrafts, permDraft)
+	}
+
+	return permDrafts, nil
+}
+
+func (d *domainDB) PutDomainPermissionDraft(
+	ctx context.Context,
+	permDraft *gtsmodel.DomainPermissionDraft,
+) error {
+	var err error
+
+	// Normalize the domain as punycode
+	permDraft.Domain, err = util.Punify(permDraft.Domain)
+	if err != nil {
+		return gtserror.Newf("error punifying domain %s: %w", permDraft.Domain, err)
+	}
+
+	return d.state.Caches.DB.DomainPermissionDraft.Store(
+		permDraft,
+		func() error {
+			_, err := d.db.
+				NewInsert().
+				Model(permDraft).
+				Exec(ctx)
+			return err
+		},
+	)
+}
+
+func (d *domainDB) DeleteDomainPermissionDraft(
+	ctx context.Context,
+	id string,
+) error {
+	// Delete the permDraft from DB.
+	q := d.db.NewDelete().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_drafts"),
+			bun.Ident("domain_permission_draft"),
+		).
+		Where(
+			"? = ?",
+			bun.Ident("domain_permission_draft.id"),
+			id,
+		)
+
+	_, err := q.Exec(ctx)
+	if err != nil && !errors.Is(err, db.ErrNoEntries) {
+		return err
+	}
+
+	// Invalidate any cached model by ID.
+	d.state.Caches.DB.DomainPermissionDraft.Invalidate("ID", id)
+
+	return nil
+}
+
+func (d *domainDB) getDomainPermissionSubscription(
+	ctx context.Context,
+	lookup string,
+	dbQuery func(*gtsmodel.DomainPermissionSubscription) error,
+	keyParts ...any,
+) (*gtsmodel.DomainPermissionSubscription, error) {
+	// Fetch perm subscription from database cache with loader callback.
+	permSub, err := d.state.Caches.DB.DomainPermissionSubscription.LoadOne(
+		lookup,
+		// Only called if not cached.
+		func() (*gtsmodel.DomainPermissionSubscription, error) {
+			var permSub gtsmodel.DomainPermissionSubscription
+			if err := dbQuery(&permSub); err != nil {
+				return nil, err
+			}
+			return &permSub, nil
+		},
+		keyParts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if gtscontext.Barebones(ctx) {
+		// No need to fully populate.
+		return permSub, nil
+	}
+
+	if permSub.CreatedByAccount == nil {
+		// Not set, fetch from database.
+		permSub.CreatedByAccount, err = d.state.DB.GetAccountByID(
+			gtscontext.SetBarebones(ctx),
+			permSub.CreatedByAccountID,
+		)
+		if err != nil {
+			return nil, gtserror.Newf("error populating created by account: %w", err)
+		}
+	}
+
+	return permSub, nil
+}
+
+func (d *domainDB) GetDomainPermissionSubscriptionByID(
+	ctx context.Context,
+	id string,
+) (*gtsmodel.DomainPermissionSubscription, error) {
+	return d.getDomainPermissionSubscription(
+		ctx,
+		"ID",
+		func(permSub *gtsmodel.DomainPermissionSubscription) error {
+			return d.db.
+				NewSelect().
+				Model(permSub).
+				Where("? = ?", bun.Ident("domain_permission_subscription.id"), id).
+				Scan(ctx)
+		},
+		id,
+	)
+}
+
+func (d *domainDB) GetDomainPermissionSubscriptions(
+	ctx context.Context,
+	permType *gtsmodel.DomainPermissionType,
+	page *paging.Page,
+) (
+	[]*gtsmodel.DomainPermissionSubscription,
+	error,
+) {
+	var (
+		// Get paging params.
+		minID = page.GetMin()
+		maxID = page.GetMax()
+		limit = page.GetLimit()
+		order = page.GetOrder()
+
+		// Make educated guess for slice size
+		permSubIDs = make([]string, 0, limit)
+	)
+
+	q := d.db.
+		NewSelect().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_subscriptions"),
+			bun.Ident("domain_permission_subscription"),
+		).
+		// Select only IDs from table
+		Column("domain_permission_subscription.id")
+
+	// Return only items with id
+	// lower than provided maxID.
+	if maxID != "" {
+		q = q.Where(
+			"? < ?",
+			bun.Ident("domain_permission_subscription.id"),
+			maxID,
+		)
+	}
+
+	// Return only items with id
+	// greater than provided minID.
+	if minID != "" {
+		q = q.Where(
+			"? > ?",
+			bun.Ident("domain_permission_subscription.id"),
+			minID,
+		)
+	}
+
+	// Return only items with
+	// given subscription ID.
+	if permType != nil {
+		q = q.Where(
+			"? = ?",
+			bun.Ident("domain_permission_subscription.permission_type"),
+			*permType,
+		)
+	}
+
+	if limit > 0 {
+		// Limit amount of
+		// items returned.
+		q = q.Limit(limit)
+	}
+
+	if order == paging.OrderAscending {
+		// Page up.
+		q = q.OrderExpr(
+			"? ASC",
+			bun.Ident("domain_permission_subscription.id"),
+		)
+	} else {
+		// Page down.
+		q = q.OrderExpr(
+			"? DESC",
+			bun.Ident("domain_permission_subscription.id"),
+		)
+	}
+
+	if err := q.Scan(ctx, &permSubIDs); err != nil {
+		return nil, err
+	}
+
+	// Catch case of no items early
+	if len(permSubIDs) == 0 {
+		return nil, db.ErrNoEntries
+	}
+
+	// If we're paging up, we still want items
+	// to be sorted by ID desc, so reverse slice.
+	if order == paging.OrderAscending {
+		slices.Reverse(permSubIDs)
+	}
+
+	// Allocate return slice (will be at most len permSubIDs).
+	permSubs := make([]*gtsmodel.DomainPermissionSubscription, 0, len(permSubIDs))
+	for _, id := range permSubIDs {
+		permSub, err := d.GetDomainPermissionSubscriptionByID(ctx, id)
+		if err != nil {
+			log.Errorf(ctx, "error getting domain permission subscription %q: %v", id, err)
+			continue
+		}
+
+		// Append to return slice
+		permSubs = append(permSubs, permSub)
+	}
+
+	return permSubs, nil
+}
+
+func (d *domainDB) PutDomainPermissionSubscription(
+	ctx context.Context,
+	permSubscription *gtsmodel.DomainPermissionSubscription,
+) error {
+	return d.state.Caches.DB.DomainPermissionSubscription.Store(
+		permSubscription,
+		func() error {
+			_, err := d.db.
+				NewInsert().
+				Model(permSubscription).
+				Exec(ctx)
+			return err
+		},
+	)
+}
+
+func (d *domainDB) DeleteDomainPermissionSubscription(
+	ctx context.Context,
+	id string,
+) error {
+	// Delete the permSub from DB.
+	q := d.db.NewDelete().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_subscriptions"),
+			bun.Ident("domain_permission_subscription"),
+		).
+		Where(
+			"? = ?",
+			bun.Ident("domain_permission_subscription.id"),
+			id,
+		)
+
+	_, err := q.Exec(ctx)
+	if err != nil && !errors.Is(err, db.ErrNoEntries) {
+		return err
+	}
+
+	// Invalidate any cached model by ID.
+	d.state.Caches.DB.DomainPermissionSubscription.Invalidate("ID", id)
+
+	return nil
+}
+
+func (d *domainDB) PutDomainPermissionIgnore(
+	ctx context.Context,
+	ignore *gtsmodel.DomainPermissionIgnore,
+) error {
+	// Normalize the domain as punycode
+	var err error
+	ignore.Domain, err = util.Punify(ignore.Domain)
+	if err != nil {
+		return err
+	}
+
+	// Attempt to store domain perm ignore in DB
+	if _, err := d.db.NewInsert().
+		Model(ignore).
+		Exec(ctx); err != nil {
+		return err
+	}
+
+	// Clear the domain perm ignore cache (for later reload)
+	d.state.Caches.DB.DomainPermissionIgnore.Clear()
+
+	return nil
+}
+
+func (d *domainDB) IsDomainPermissionIgnored(ctx context.Context, domain string) (bool, error) {
+	// Normalize the domain as punycode
+	domain, err := util.Punify(domain)
+	if err != nil {
+		return false, err
+	}
+
+	// Check if our host and given domain are equal
+	// or part of the same second-level domain; we
+	// always ignore such perms as creating blocks
+	// or allows in such cases may break things.
+	if dns.CompareDomainName(domain, config.GetHost()) >= 2 {
+		return true, nil
+	}
+
+	// Func to scan list of all
+	// ignored domain perms from DB.
+	loadF := func() ([]string, error) {
+		var domains []string
+
+		if err := d.db.
+			NewSelect().
+			Table("domain_ignores").
+			Column("domain").
+			Scan(ctx, &domains); err != nil {
+			return nil, err
+		}
+
+		return domains, nil
+	}
+
+	// Check the cache for a domain perm ignore,
+	// hydrating the cache with loadF if necessary.
+	return d.state.Caches.DB.DomainPermissionIgnore.Matches(domain, loadF)
+}
+
+func (d *domainDB) GetDomainPermissionIgnoreByID(
+	ctx context.Context,
+	id string,
+) (*gtsmodel.DomainPermissionIgnore, error) {
+	ignore := new(gtsmodel.DomainPermissionIgnore)
+
+	q := d.db.
+		NewSelect().
+		Model(ignore).
+		Where("? = ?", bun.Ident("domain_permission_ignore.id"), id)
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	if gtscontext.Barebones(ctx) {
+		// No need to fully populate.
+		return ignore, nil
+	}
+
+	if ignore.CreatedByAccount == nil {
+		// Not set, fetch from database.
+		var err error
+		ignore.CreatedByAccount, err = d.state.DB.GetAccountByID(
+			gtscontext.SetBarebones(ctx),
+			ignore.CreatedByAccountID,
+		)
+		if err != nil {
+			return nil, gtserror.Newf("error populating created by account: %w", err)
+		}
+	}
+
+	return ignore, nil
+}
+
+func (d *domainDB) GetDomainPermissionIgnores(
+	ctx context.Context,
+	permType *gtsmodel.DomainPermissionType,
+	page *paging.Page,
+) (
+	[]*gtsmodel.DomainPermissionIgnore,
+	error,
+) {
+	var (
+		// Get paging params.
+		minID = page.GetMin()
+		maxID = page.GetMax()
+		limit = page.GetLimit()
+		order = page.GetOrder()
+
+		// Make educated guess for slice size
+		ignoreIDs = make([]string, 0, limit)
+	)
+
+	q := d.db.
+		NewSelect().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_ignores"),
+			bun.Ident("domain_permission_ignore"),
+		).
+		// Select only IDs from table
+		Column("domain_permission_ignore.id")
+
+	// Return only items with id
+	// lower than provided maxID.
+	if maxID != "" {
+		q = q.Where(
+			"? < ?",
+			bun.Ident("domain_permission_ignore.id"),
+			maxID,
+		)
+	}
+
+	// Return only items with id
+	// greater than provided minID.
+	if minID != "" {
+		q = q.Where(
+			"? > ?",
+			bun.Ident("domain_permission_ignore.id"),
+			minID,
+		)
+	}
+
+	// Return only items with
+	// given subscription ID.
+	if permType != nil {
+		q = q.Where(
+			"? = ?",
+			bun.Ident("domain_permission_ignore.permission_type"),
+			*permType,
+		)
+	}
+
+	if limit > 0 {
+		// Limit amount of
+		// items returned.
+		q = q.Limit(limit)
+	}
+
+	if order == paging.OrderAscending {
+		// Page up.
+		q = q.OrderExpr(
+			"? ASC",
+			bun.Ident("domain_permission_ignore.id"),
+		)
+	} else {
+		// Page down.
+		q = q.OrderExpr(
+			"? DESC",
+			bun.Ident("domain_permission_ignore.id"),
+		)
+	}
+
+	if err := q.Scan(ctx, &ignoreIDs); err != nil {
+		return nil, err
+	}
+
+	// Catch case of no items early
+	if len(ignoreIDs) == 0 {
+		return nil, db.ErrNoEntries
+	}
+
+	// If we're paging up, we still want items
+	// to be sorted by ID desc, so reverse slice.
+	if order == paging.OrderAscending {
+		slices.Reverse(ignoreIDs)
+	}
+
+	// Allocate return slice (will be at most len permSubIDs).
+	ignores := make([]*gtsmodel.DomainPermissionIgnore, 0, len(ignoreIDs))
+	for _, id := range ignoreIDs {
+		ignore, err := d.GetDomainPermissionIgnoreByID(ctx, id)
+		if err != nil {
+			log.Errorf(ctx, "error getting domain permission ignore %q: %v", id, err)
+			continue
+		}
+
+		// Append to return slice
+		ignores = append(ignores, ignore)
+	}
+
+	return ignores, nil
+}
+
+func (d *domainDB) DeleteDomainPermissionIgnore(
+	ctx context.Context,
+	id string,
+) error {
+	// Delete the permSub from DB.
+	q := d.db.NewDelete().
+		TableExpr(
+			"? AS ?",
+			bun.Ident("domain_permission_ignores"),
+			bun.Ident("domain_permission_ignore"),
+		).
+		Where(
+			"? = ?",
+			bun.Ident("domain_permission_ignore.id"),
+			id,
+		)
+
+	_, err := q.Exec(ctx)
+	if err != nil && !errors.Is(err, db.ErrNoEntries) {
+		return err
+	}
+
+	// Clear the domain perm ignore cache (for later reload)
+	d.state.Caches.DB.DomainPermissionIgnore.Clear()
+
+	return nil
 }
